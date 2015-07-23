@@ -1,4 +1,6 @@
-import sys, codecs, os
+import sys, codecs, os, time
+from scipy.stats import chi2_contingency
+import numpy as np
 
 os.environ['CLASSPATH'] = "../miralib/dist/*" # Need this to load the classes from the jar files
 
@@ -13,13 +15,26 @@ Preferences = autoclass("miralib.utils.Preferences")
 Project = autoclass("miralib.utils.Project")
 DataRanges = autoclass("miralib.data.DataRanges")
 DataSet = autoclass("miralib.data.DataSet")
-Variable = autoclass("miralib.data.Variable")
-DataSlice2D = autoclass("miralib.data.DataSlice2D")
+Histogram = autoclass("miralib.data.ContingencyTable")
 Similarity = autoclass("miralib.shannon.Similarity")
+PValue = autoclass("miralib.shannon.PValue")
+
+def getContingency(slice, proj):
+    table = slice.getContingencyTable(proj)
+    if not table.empty():
+        rows = []
+        for r in range(0, table.rowCount):
+            row = table.getRow(r)
+            if 0 in row: return None
+            rows.append(row)
+        return np.array(rows)
+    else: 
+        return None
 
 Log.init()
 
-inputFile = "./config.mira";
+# inputFile = "./data_nhanes/config.mira";
+inputFile = "./data_lassa/config.mira";
 outputFile = "./network.csv";
 
 len = len(sys.argv)
@@ -50,61 +65,51 @@ ranges = DataRanges();
 data = DataSet(project);
 
 print "Total number of data points:", data.getRowCount(ranges)
-
-# Example of how to set ranges programmatically:
-age = data.getVariable("AGE")
-# Alias can also be used to search variables
-#age = data.getVariableByAlias("Age at admission")
-gender = data.getVariable("SEX")
-adults = age.createRange(10, 50)
-females = gender.createRange("Female")
+age = data.getVariableByAlias("Age at admission")
+# age = data.getVariableByAlias("Age at Screening Adjudicated - Recode")
+adults = age.createRange(18, 50)
 ranges.update(age, adults)
-ranges.update(gender, females)
-
 print "Number of data points matching ranges:", data.getRowCount(ranges)
 
 print "Total number of variables", data.getColumnCount()
 
-# Deselecting some columns (all variables are set as columns by default)
 data.removeColumns(data.getGroup("GWAS"))
 data.removeColumns(data.getGroup("Treatment"))
 data.removeColumns(data.getTable("Maximum Values of Lab Results"))
 data.removeColumns(data.getTable("Last Day of Lab Results"))
 
+# data.removeColumns(data.getGroup("Examination"))
+
 count = data.getColumnCount()
 output = [""] * (count + 1)
 print "Number of selected variables", count
 
-print "Calculating correlation matrix:"
-scores = [[0 for x in xrange(count)] for x in xrange(count)] 
+t0 = time.time()
+print "*************************************"
+total = 0
+diff = 0
 for i in range(0, count):
-    vi = data.getColumn(i)
-    print "  Variable: " + vi.getAlias() + " - " + str(i) + "/" + str(count) + "..."
-    for j in range(i, count):
-        vj = data.getColumn(j)
-        slice = data.getSlice(vi, vj, ranges)
-        score = 0
-        if i != j and slice.missing < project.missingThreshold():
-            score = Similarity.calculate(slice, project.pvalue(), project)
-        scores[i][j] = scores[j][i] = score        
-print "Done."
+    vari = data.getColumn(i)
+    if vari.categorical():
+       print vari.getAlias()
+       for j in range(0, count):
+           varj = data.getColumn(j)
+           if varj.categorical():
+               slice = data.getSlice(vari, varj, ranges)
+               if project.missingThreshold() <= slice.missing: continue
+               obs = getContingency(slice, project)
+               if obs == None: continue
+               chi2, p, dof, ex = chi2_contingency(obs, correction=False)
+               score = Similarity.calculate(slice, project.pvalue(), project)
+               chi2_res = p < project.pvalue()
+               simil_res = 0 < score
+               total += 1
+               if chi2_res != simil_res: 
+                   mark = "<----"
+                   diff += 1
+               else: mark = ""
+               print vari.getAlias(), varj.getAlias(), p, p < project.pvalue(), 0 < score, mark
+t1 = time.time()
 
-header = "";
-for i in range(0, count):
-    vi = data.getColumn(i)
-    vname = vi.getAlias().replace('"', '\'');
-    header = header + ";\"" + vname + "\"";
-output[0] = header;
-
-for i in range(0, count):
-    vi = data.getColumn(i)
-    vname = vi.getAlias().replace('"', '\'')
-    line = "\"" + vname + "\""
-    for j in range(0, count):
-        line = line + ";" + str(scores[i][j])
-    output[1 + i] = line
-
-file = codecs.open(outputFile, "w", "utf-8")
-for line in output:
-    file.write(line + "\n");
-file.close()  
+print "differences:", diff, "/" , total, "=",(100.0*diff/total), "%"
+print "time:",t1-t0
